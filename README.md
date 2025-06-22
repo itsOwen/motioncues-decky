@@ -1,2 +1,1 @@
-# motioncues-decky
-Motion Cues
+# Motion

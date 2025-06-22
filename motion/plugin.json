@@ -1,0 +1,11 @@
+{
+  "name": "Motion Comfort",
+  "author": "Your Name",
+  "flags": [],
+  "api_version": 1,
+  "publish": {
+    "tags": ["motion-sickness", "comfort", "gyroscope", "motion-cues"],
+    "description": "Reduce motion sickness with Apple-like visual cues based on Steam Deck's built-in motion sensors.",
+    "image": "https://raw.githubusercontent.com/yourusername/MotionComfort/main/assets/motion-comfort.jpg"
+  }
+}
