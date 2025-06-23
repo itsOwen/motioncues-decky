@@ -6,6 +6,8 @@ import threading
 import socket
 import struct
 import time
+import urllib.request
+import ssl
 from pathlib import Path
 
 # Constants
@@ -42,6 +44,7 @@ class Plugin:
     motion_data = MotionData()
     settings = DEFAULT_SETTINGS.copy()
     dsu_running = False
+    dsu_installed = False
     motion_client_running = False
     motion_client_thread = None
     
@@ -95,17 +98,44 @@ class Plugin:
             return {"status": "error", "message": str(e)}
     
     def check_dsu_installed(self):
+        # Check if binary exists
         service_path = os.path.expanduser("~/sdgyrodsu/sdgyrodsu")
         self.dsu_installed = os.path.exists(service_path)
         
-        # Check if service is running
+        # Check if service is running with clean environment
         try:
+            # Create clean environment to avoid SSL issues
+            clean_env = {}
+            for key, value in os.environ.items():
+                if key not in ['LD_LIBRARY_PATH', 'LD_PRELOAD']:
+                    clean_env[key] = value
+            clean_env['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+            
             result = subprocess.run(
                 ["systemctl", "--user", "is-active", "sdgyrodsu.service"],
                 capture_output=True,
-                text=True
+                text=True,
+                timeout=5,
+                env=clean_env
             )
             self.dsu_running = result.stdout.strip() == "active"
+            
+            # If systemctl fails but binary exists, check if process is running
+            if not self.dsu_running and self.dsu_installed:
+                try:
+                    pgrep_result = subprocess.run(
+                        ["pgrep", "-f", "sdgyrodsu"],
+                        capture_output=True,
+                        text=True,
+                        timeout=5
+                    )
+                    self.dsu_running = pgrep_result.returncode == 0
+                    if self.dsu_running:
+                        decky.logger.info("Service detected via pgrep instead of systemctl")
+                except Exception:
+                    pass
+                    
+            decky.logger.info(f"Service status check: installed={self.dsu_installed}, running={self.dsu_running}")
         except Exception as e:
             decky.logger.error(f"Error checking DSU service: {str(e)}")
             self.dsu_running = False
@@ -236,42 +266,288 @@ class Plugin:
     
     async def install_dsu(self):
         try:
-            # Create temp directory
-            temp_dir = os.path.join(decky.DECKY_PLUGIN_RUNTIME_DIR, "temp")
-            os.makedirs(temp_dir, exist_ok=True)
+            decky.logger.info("Starting SteamDeckGyroDSU installation...")
             
-            # Download installation file
-            download_cmd = [
-                "curl", "-L", "-o", 
-                f"{temp_dir}/update-sdgyrodsu.desktop",
-                "https://github.com/kmicki/SteamDeckGyroDSU/releases/latest/download/update-sdgyrodsu.desktop"
+            # The zip file is already downloaded by decky loader to the bin directory
+            bin_dir = os.path.join(decky.DECKY_PLUGIN_DIR, "bin")
+            zip_path = os.path.join(bin_dir, "SteamDeckGyroDSUSetup.zip")
+            
+            decky.logger.info(f"Looking for zip file at: {zip_path}")
+            
+            if not os.path.exists(zip_path):
+                decky.logger.error(f"Zip file not found at {zip_path}")
+                return {"status": "error", "message": "SteamDeckGyroDSU installation files not found. Please restart Steam to download required files."}
+            
+            # Check file size
+            file_size = os.path.getsize(zip_path)
+            decky.logger.info(f"Zip file size: {file_size} bytes")
+            
+            if file_size < 1000:
+                return {"status": "error", "message": "Installation file appears to be corrupted"}
+            
+            decky.logger.info("Extracting SteamDeckGyroDSU...")
+            
+            # Extract the zip file to a temp directory first
+            temp_extract_dir = os.path.expanduser("~/temp_sdgyrodsu_install")
+            extract_cmd = ["unzip", "-o", zip_path, "-d", temp_extract_dir]
+            extract_result = subprocess.run(extract_cmd, capture_output=True, text=True, timeout=30)
+            
+            if extract_result.returncode != 0:
+                decky.logger.error(f"Extraction failed: {extract_result.stderr}")
+                return {"status": "error", "message": f"Extraction failed: {extract_result.stderr}"}
+            
+            decky.logger.info("Extraction completed")
+            
+            # Now manually do what install.sh does, but in Python
+            setup_dir = os.path.join(temp_extract_dir, "SteamDeckGyroDSUSetup")
+            
+            if not os.path.exists(setup_dir):
+                return {"status": "error", "message": "Setup directory not found after extraction"}
+            
+            # Step 1: Create ~/sdgyrodsu directory
+            decky.logger.info("Creating sdgyrodsu directory...")
+            sdgyrodsu_dir = os.path.expanduser("~/sdgyrodsu")
+            os.makedirs(sdgyrodsu_dir, exist_ok=True)
+            
+            # Step 2: Copy binary files
+            decky.logger.info("Copying binary files...")
+            import shutil
+            
+            files_to_copy = [
+                "sdgyrodsu",
+                "update.sh", 
+                "uninstall.sh",
+                "v1cleanup.sh",
+                "logcurrentrun.sh"
             ]
             
-            result = subprocess.run(download_cmd, capture_output=True, text=True)
-            if result.returncode != 0:
-                return {"status": "error", "message": f"Download failed: {result.stderr}"}
+            for file_name in files_to_copy:
+                src = os.path.join(setup_dir, file_name)
+                dst = os.path.join(sdgyrodsu_dir, file_name)
+                
+                if os.path.exists(src):
+                    shutil.copy2(src, dst)
+                    # Make executable
+                    os.chmod(dst, 0o755)
+                    decky.logger.info(f"Copied and made executable: {file_name}")
+                else:
+                    decky.logger.warning(f"File not found: {src}")
             
-            # Make executable
-            subprocess.run(["chmod", "+x", f"{temp_dir}/update-sdgyrodsu.desktop"])
+            # Step 3: Copy service file
+            decky.logger.info("Installing systemd service...")
+            systemd_user_dir = os.path.expanduser("~/.config/systemd/user")
+            os.makedirs(systemd_user_dir, exist_ok=True)
             
-            # Run the installer
+            service_src = os.path.join(setup_dir, "sdgyrodsu.service")
+            service_dst = os.path.join(systemd_user_dir, "sdgyrodsu.service")
+            
+            if os.path.exists(service_src):
+                shutil.copy2(service_src, service_dst)
+                decky.logger.info("Service file copied")
+            else:
+                return {"status": "error", "message": "Service file not found"}
+            
+            # Step 4: Try to enable and start service with clean environment
+            decky.logger.info("Attempting to start service...")
+            
+            # First, try to reload systemd daemon with clean environment
+            try:
+                # Create a clean environment without Python's temp paths
+                clean_env = {}
+                for key, value in os.environ.items():
+                    if key not in ['LD_LIBRARY_PATH', 'LD_PRELOAD']:
+                        clean_env[key] = value
+                
+                # Set clean PATH
+                clean_env['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+                
+                subprocess.run(["systemctl", "--user", "daemon-reload"], 
+                             capture_output=True, text=True, timeout=10, env=clean_env)
+                decky.logger.info("Systemd daemon reloaded with clean environment")
+            except Exception as e:
+                decky.logger.warning(f"Failed to reload daemon: {e}")
+            
+            # Try to enable and start service with clean environment
+            service_started = False
+            try:
+                enable_result = subprocess.run(
+                    ["systemctl", "--user", "enable", "sdgyrodsu.service"],
+                    capture_output=True, text=True, timeout=10, env=clean_env
+                )
+                if enable_result.returncode == 0:
+                    decky.logger.info("Service enabled successfully")
+                else:
+                    decky.logger.warning(f"Service enable failed: {enable_result.stderr}")
+                
+                start_result = subprocess.run(
+                    ["systemctl", "--user", "start", "sdgyrodsu.service"],
+                    capture_output=True, text=True, timeout=10, env=clean_env
+                )
+                if start_result.returncode == 0:
+                    decky.logger.info("Service started successfully")
+                    service_started = True
+                else:
+                    decky.logger.warning(f"Service start failed: {start_result.stderr}")
+                    
+            except Exception as e:
+                decky.logger.warning(f"systemctl commands failed even with clean environment: {e}")
+            
+            # If systemctl still fails, try starting binary directly
+            if not service_started:
+                decky.logger.info("systemctl failed, trying to start binary directly...")
+                try:
+                    binary_path = os.path.join(sdgyrodsu_dir, "sdgyrodsu")
+                    if os.path.exists(binary_path):
+                        # Start in background with clean environment
+                        process = subprocess.Popen([binary_path], 
+                                       cwd=sdgyrodsu_dir,
+                                       stdout=subprocess.DEVNULL,
+                                       stderr=subprocess.DEVNULL,
+                                       env=clean_env)
+                        decky.logger.info(f"Started binary directly with PID: {process.pid}")
+                        time.sleep(2)  # Give it time to start
+                        
+                        # Check if process is still running
+                        if process.poll() is None:
+                            decky.logger.info("Binary is running successfully")
+                            service_started = True
+                        else:
+                            decky.logger.warning("Binary exited immediately")
+                            
+                except Exception as binary_error:
+                    decky.logger.warning(f"Direct binary start failed: {binary_error}")
+            
+            # Clean up extraction directory
+            try:
+                shutil.rmtree(temp_extract_dir, ignore_errors=True)
+            except:
+                pass
+            
+            decky.logger.info("Installation completed, checking status...")
+            
+            # Give it a moment for everything to settle
+            time.sleep(3)
+            
+            # Check if installation succeeded
+            service_check = self.check_dsu_installed()
+            decky.logger.info(f"Post-install check: {service_check}")
+            
+            # Update our internal state
+            self.dsu_installed = service_check["installed"]
+            self.dsu_running = service_check["running"]
+            
+            if service_check["installed"]:
+                if service_check["running"]:
+                    return {"status": "success", "message": "SteamDeckGyroDSU installed and started successfully"}
+                else:
+                    return {"status": "success", "message": "SteamDeckGyroDSU installed successfully. You may need to manually start it from Steam Deck settings."}
+            else:
+                return {"status": "error", "message": "Installation files copied but service not detected"}
+        
+        except subprocess.TimeoutExpired:
+            decky.logger.error("Installation timed out")
+            return {"status": "error", "message": "Installation timed out"}
+        except Exception as e:
+            decky.logger.error(f"Error installing DSU: {str(e)}")
+            return {"status": "error", "message": str(e)}
+            
+            decky.logger.info("Download completed, extracting...")
+            
+            # Extract the zip file to home directory
+            extract_cmd = ["unzip", "-o", zip_path, "-d", os.path.expanduser("~")]
+            extract_result = subprocess.run(extract_cmd, capture_output=True, text=True, timeout=30)
+            
+            if extract_result.returncode != 0:
+                decky.logger.error(f"Extraction failed: {extract_result.stderr}")
+                return {"status": "error", "message": f"Extraction failed: {extract_result.stderr}"}
+            
+            decky.logger.info("Extraction completed")
+            
+            # Clean up the zip file
+            try:
+                os.remove(zip_path)
+            except:
+                pass
+            
+            # Check if install script exists
+            install_script_path = os.path.expanduser("~/SteamDeckGyroDSUSetup/install.sh")
+            
+            if not os.path.exists(install_script_path):
+                return {"status": "error", "message": "Install script not found after extraction"}
+            
+            # Make the install script executable
+            subprocess.run(["chmod", "+x", install_script_path], capture_output=True, timeout=10)
+            
+            decky.logger.info("Running installer...")
+            
+            # Run the installer with proper environment
             install_result = subprocess.run(
-                [f"{temp_dir}/update-sdgyrodsu.desktop"],
+                ["bash", "./install.sh"],
+                cwd=os.path.expanduser("~/SteamDeckGyroDSUSetup"),
                 capture_output=True,
-                text=True
+                text=True,
+                timeout=120,
+                env=os.environ.copy()
             )
             
+            decky.logger.info(f"Installer stdout: {install_result.stdout}")
+            if install_result.stderr:
+                decky.logger.warning(f"Installer stderr: {install_result.stderr}")
+            
             if install_result.returncode != 0:
-                return {"status": "error", "message": f"Installation failed: {install_result.stderr}"}
+                decky.logger.error(f"Installation failed with return code {install_result.returncode}")
+                return {"status": "error", "message": f"Installation failed: {install_result.stderr or 'Unknown error'}"}
+            
+            # Clean up the extracted directory
+            import shutil
+            try:
+                shutil.rmtree(os.path.expanduser("~/SteamDeckGyroDSUSetup"), ignore_errors=True)
+            except:
+                pass
+            
+            decky.logger.info("Installation completed, checking status...")
+            
+            # Give it a moment for the service to start
+            time.sleep(2)
             
             # Check if installation succeeded
             service_check = self.check_dsu_installed()
             
-            if service_check["installed"] and service_check["running"]:
-                return {"status": "success", "message": "SteamDeckGyroDSU installed successfully"}
-            else:
-                return {"status": "error", "message": "Installation completed but service not running"}
+            decky.logger.info(f"Post-install check: {service_check}")
             
+            if service_check["installed"]:
+                # If installed but not running, try to start it
+                if not service_check["running"]:
+                    decky.logger.info("Service installed but not running, attempting to start...")
+                    try:
+                        start_result = subprocess.run(
+                            ["systemctl", "--user", "start", "sdgyrodsu.service"],
+                            capture_output=True,
+                            text=True,
+                            timeout=10
+                        )
+                        if start_result.returncode == 0:
+                            time.sleep(1)
+                            service_check = self.check_dsu_installed()
+                        else:
+                            decky.logger.warning(f"Failed to start service: {start_result.stderr}")
+                    except Exception as e:
+                        decky.logger.warning(f"Error starting service: {e}")
+                
+                # Update our internal state
+                self.dsu_installed = service_check["installed"]
+                self.dsu_running = service_check["running"]
+                
+                if service_check["running"]:
+                    return {"status": "success", "message": "SteamDeckGyroDSU installed and started successfully"}
+                else:
+                    return {"status": "success", "message": "SteamDeckGyroDSU installed successfully (service may need manual start)"}
+            else:
+                return {"status": "error", "message": "Installation completed but service not found"}
+        
+        except subprocess.TimeoutExpired:
+            decky.logger.error("Installation timed out")
+            return {"status": "error", "message": "Installation timed out"}
         except Exception as e:
             decky.logger.error(f"Error installing DSU: {str(e)}")
             return {"status": "error", "message": str(e)}
@@ -281,12 +557,38 @@ class Plugin:
             # Stop motion client first
             self.stop_motion_client()
             
-            # Run uninstall script
-            uninstall_cmd = ["bash", os.path.expanduser("~/sdgyrodsu/uninstall.sh")]
-            result = subprocess.run(uninstall_cmd, capture_output=True, text=True)
+            # Check if uninstall script exists
+            uninstall_script = os.path.expanduser("~/sdgyrodsu/uninstall.sh")
             
-            if result.returncode != 0:
-                return {"status": "error", "message": f"Uninstallation failed: {result.stderr}"}
+            if os.path.exists(uninstall_script):
+                # Run uninstall script
+                uninstall_cmd = ["bash", uninstall_script]
+                result = subprocess.run(uninstall_cmd, capture_output=True, text=True, timeout=30)
+                
+                if result.returncode != 0:
+                    decky.logger.warning(f"Uninstall script failed: {result.stderr}")
+            
+            # Force cleanup if script fails or doesn't exist
+            try:
+                # Stop and disable service
+                subprocess.run(["systemctl", "--user", "stop", "sdgyrodsu.service"], 
+                             capture_output=True, timeout=10)
+                subprocess.run(["systemctl", "--user", "disable", "sdgyrodsu.service"], 
+                             capture_output=True, timeout=10)
+                
+                # Remove service file
+                service_file = os.path.expanduser("~/.config/systemd/user/sdgyrodsu.service")
+                if os.path.exists(service_file):
+                    os.remove(service_file)
+                
+                # Remove directory
+                import shutil
+                sdgyrodsu_dir = os.path.expanduser("~/sdgyrodsu")
+                if os.path.exists(sdgyrodsu_dir):
+                    shutil.rmtree(sdgyrodsu_dir, ignore_errors=True)
+                
+            except Exception as e:
+                decky.logger.warning(f"Error during force cleanup: {e}")
             
             # Update status
             self.dsu_installed = False
@@ -300,16 +602,50 @@ class Plugin:
     
     async def start_dsu_service(self):
         try:
+            # Create clean environment to avoid SSL issues
+            clean_env = {}
+            for key, value in os.environ.items():
+                if key not in ['LD_LIBRARY_PATH', 'LD_PRELOAD']:
+                    clean_env[key] = value
+            clean_env['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+            
             result = subprocess.run(
                 ["systemctl", "--user", "start", "sdgyrodsu.service"],
                 capture_output=True,
-                text=True
+                text=True,
+                timeout=10,
+                env=clean_env
             )
             
             if result.returncode != 0:
+                decky.logger.warning(f"systemctl start failed: {result.stderr}")
+                # Try starting binary directly as fallback
+                try:
+                    binary_path = os.path.expanduser("~/sdgyrodsu/sdgyrodsu")
+                    if os.path.exists(binary_path):
+                        process = subprocess.Popen([binary_path], 
+                                   cwd=os.path.expanduser("~/sdgyrodsu"),
+                                   stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL,
+                                   env=clean_env)
+                        decky.logger.info(f"Started binary directly with PID: {process.pid}")
+                        time.sleep(2)
+                        if process.poll() is None:
+                            # Give it a moment and check status
+                            time.sleep(1)
+                            status_check = self.check_dsu_installed()
+                            self.dsu_running = status_check["running"]
+                            return {"status": "success", "message": "Service started directly"}
+                except Exception as binary_error:
+                    return {"status": "error", "message": f"Failed to start service or binary: {binary_error}"}
+                
                 return {"status": "error", "message": f"Failed to start service: {result.stderr}"}
             
-            self.dsu_running = True
+            # Give it a moment and check status
+            time.sleep(1)
+            status_check = self.check_dsu_installed()
+            self.dsu_running = status_check["running"]
+            
             return {"status": "success", "message": "Service started successfully"}
             
         except Exception as e:
@@ -321,14 +657,29 @@ class Plugin:
             # Stop motion client first
             self.stop_motion_client()
             
+            # Create clean environment to avoid SSL issues
+            clean_env = {}
+            for key, value in os.environ.items():
+                if key not in ['LD_LIBRARY_PATH', 'LD_PRELOAD']:
+                    clean_env[key] = value
+            clean_env['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+            
             result = subprocess.run(
                 ["systemctl", "--user", "stop", "sdgyrodsu.service"],
                 capture_output=True,
-                text=True
+                text=True,
+                timeout=10,
+                env=clean_env
             )
             
             if result.returncode != 0:
-                return {"status": "error", "message": f"Failed to stop service: {result.stderr}"}
+                decky.logger.warning(f"systemctl stop failed: {result.stderr}")
+                # Try to kill process directly as fallback
+                try:
+                    subprocess.run(["pkill", "-f", "sdgyrodsu"], capture_output=True, timeout=5)
+                    decky.logger.info("Killed sdgyrodsu process directly")
+                except Exception as kill_error:
+                    decky.logger.warning(f"Failed to kill process: {kill_error}")
             
             self.dsu_running = False
             return {"status": "success", "message": "Service stopped successfully"}
@@ -349,7 +700,8 @@ class Plugin:
                 else:
                     # Try to start DSU service
                     await self.start_dsu_service()
-                    self.start_motion_client()
+                    if self.dsu_running:
+                        self.start_motion_client()
             else:
                 # Stop the motion client
                 self.stop_motion_client()

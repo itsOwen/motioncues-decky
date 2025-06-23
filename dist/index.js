@@ -413,9 +413,12 @@ function MotionComfortContent() {
     SP_REACT.useEffect(() => {
         const loadInitialData = async () => {
             try {
+                console.log("Loading initial data...");
                 const status = await checkDsuInstalled();
+                console.log("Initial status:", status);
                 setServiceStatus(status);
                 const loadedSettings = await getSettings();
+                console.log("Loaded settings:", loadedSettings);
                 setSettings(loadedSettings);
                 if (status.running && loadedSettings.enabled) {
                     startDataUpdates();
@@ -426,16 +429,24 @@ function MotionComfortContent() {
             }
         };
         loadInitialData();
-        // Set up regular service status check
+        // Set up regular service status check (more frequent)
         const statusInterval = setInterval(async () => {
             try {
                 const status = await checkDsuInstalled();
-                setServiceStatus(status);
+                console.log("Status poll:", status);
+                setServiceStatus(prevStatus => {
+                    // Only update if status actually changed
+                    if (prevStatus.installed !== status.installed || prevStatus.running !== status.running) {
+                        console.log("Status changed:", prevStatus, "->", status);
+                        return status;
+                    }
+                    return prevStatus;
+                });
             }
             catch (error) {
                 console.error("Error checking service status:", error);
             }
-        }, 5000);
+        }, 2000); // Check every 2 seconds for faster updates
         return () => {
             clearInterval(statusInterval);
             if (dataUpdateInterval) {
@@ -482,13 +493,68 @@ function MotionComfortContent() {
         }
         setShowOverlay(false);
     };
+    // Manual refresh function
+    const handleRefreshStatus = async () => {
+        try {
+            console.log("Manual refresh triggered");
+            const status = await checkDsuInstalled();
+            console.log("Manual refresh result:", status);
+            setServiceStatus(status);
+            const loadedSettings = await getSettings();
+            setSettings(loadedSettings);
+            if (status.running && loadedSettings.enabled) {
+                startDataUpdates();
+            }
+        }
+        catch (error) {
+            console.error("Error during manual refresh:", error);
+        }
+    };
     // Handle install button click
     const handleInstall = async () => {
         try {
             setInstalling(true);
+            console.log("Starting installation...");
             const result = await installDsu();
+            console.log("Installation result:", result);
             if (result.status === "success") {
-                setServiceStatus({ installed: true, running: true });
+                // Force multiple status checks to ensure UI updates
+                console.log("Installation successful, forcing status updates...");
+                // Immediate check
+                try {
+                    const status1 = await checkDsuInstalled();
+                    console.log("Immediate status check:", status1);
+                    setServiceStatus(status1);
+                }
+                catch (error) {
+                    console.error("Immediate status check failed:", error);
+                }
+                // Check after 1 second
+                setTimeout(async () => {
+                    try {
+                        const status2 = await checkDsuInstalled();
+                        console.log("1-second delayed status check:", status2);
+                        setServiceStatus(status2);
+                        // If service is running and plugin is enabled, start data updates
+                        if (status2.running && settings?.enabled) {
+                            startDataUpdates();
+                        }
+                    }
+                    catch (error) {
+                        console.error("Error checking status after 1s:", error);
+                    }
+                }, 1000);
+                // Check after 3 seconds
+                setTimeout(async () => {
+                    try {
+                        const status3 = await checkDsuInstalled();
+                        console.log("3-second delayed status check:", status3);
+                        setServiceStatus(status3);
+                    }
+                    catch (error) {
+                        console.error("Error checking status after 3s:", error);
+                    }
+                }, 3000);
             }
             else {
                 console.error("Installation failed:", result.message);
@@ -509,7 +575,18 @@ function MotionComfortContent() {
                     stopDataUpdates();
                     const result = await uninstallDsu();
                     if (result.status === "success") {
-                        setServiceStatus({ installed: false, running: false });
+                        // Force status update after uninstall
+                        setTimeout(async () => {
+                            try {
+                                const status = await checkDsuInstalled();
+                                setServiceStatus(status);
+                            }
+                            catch (error) {
+                                console.error("Error checking status after uninstall:", error);
+                                // Force UI update even if check fails
+                                setServiceStatus({ installed: false, running: false });
+                            }
+                        }, 1000);
                     }
                     else {
                         console.error("Uninstallation failed:", result.message);
@@ -536,10 +613,19 @@ function MotionComfortContent() {
             else {
                 const result = await startDsuService();
                 if (result.status === "success") {
-                    setServiceStatus({ ...serviceStatus, running: true });
-                    if (settings?.enabled) {
-                        startDataUpdates();
-                    }
+                    // Check status after a brief delay
+                    setTimeout(async () => {
+                        try {
+                            const status = await checkDsuInstalled();
+                            setServiceStatus(status);
+                            if (status.running && settings?.enabled) {
+                                startDataUpdates();
+                            }
+                        }
+                        catch (error) {
+                            console.error("Error checking status after service start:", error);
+                        }
+                    }, 1000);
                 }
             }
         }
@@ -720,29 +806,42 @@ function MotionComfortContent() {
                     motionData.fresh ? "Yes" : "No"))));
     };
     return (window.SP_REACT.createElement(window.SP_REACT.Fragment, null,
-        window.SP_REACT.createElement(DFL.PanelSection, { title: "Motion Comfort" }, !serviceStatus.installed ? (window.SP_REACT.createElement(DFL.PanelSectionRow, null,
-            window.SP_REACT.createElement(DFL.ButtonItem, { layout: "below", onClick: handleInstall, disabled: installing }, installing ? "Installing..." : "🔧 Install SteamDeckGyroDSU"))) : (window.SP_REACT.createElement(window.SP_REACT.Fragment, null,
+        window.SP_REACT.createElement(DFL.PanelSection, { title: "Motion Comfort" },
             window.SP_REACT.createElement(DFL.PanelSectionRow, null,
-                window.SP_REACT.createElement("div", { style: { color: serviceStatus.running ? "green" : "red" } }, serviceStatus.running ? "🟢 Service Running" : "🔴 Service Stopped")),
+                window.SP_REACT.createElement("div", { style: { fontSize: '0.7em', opacity: 0.6, padding: '4px', backgroundColor: '#2a2a2a', borderRadius: '4px' } },
+                    window.SP_REACT.createElement("div", null,
+                        "Debug: installed=",
+                        serviceStatus.installed.toString(),
+                        ", running=",
+                        serviceStatus.running.toString()),
+                    window.SP_REACT.createElement("div", null,
+                        "Settings loaded: ",
+                        settings ? 'Yes' : 'No'))),
             window.SP_REACT.createElement(DFL.PanelSectionRow, null,
-                window.SP_REACT.createElement(DFL.ButtonItem, { layout: "below", onClick: handleServiceToggle }, serviceStatus.running ? "⏹️ Stop Service" : "▶️ Start Service")),
-            settings && (window.SP_REACT.createElement(window.SP_REACT.Fragment, null,
+                window.SP_REACT.createElement(DFL.ButtonItem, { layout: "below", onClick: handleRefreshStatus }, "\uD83D\uDD04 Refresh Status")),
+            !serviceStatus.installed ? (window.SP_REACT.createElement(DFL.PanelSectionRow, null,
+                window.SP_REACT.createElement(DFL.ButtonItem, { layout: "below", onClick: handleInstall, disabled: installing }, installing ? "Installing..." : "🔧 Install SteamDeckGyroDSU"))) : (window.SP_REACT.createElement(window.SP_REACT.Fragment, null,
                 window.SP_REACT.createElement(DFL.PanelSectionRow, null,
-                    window.SP_REACT.createElement(DFL.ToggleField, { label: "Enable Motion Comfort", description: "Display visual cues to reduce motion sickness", checked: settings.enabled, onChange: handleEnabledToggle, disabled: !serviceStatus.running })),
-                settings.enabled && (window.SP_REACT.createElement(window.SP_REACT.Fragment, null,
+                    window.SP_REACT.createElement("div", { style: { color: serviceStatus.running ? "green" : "red" } }, serviceStatus.running ? "🟢 Service Running" : "🔴 Service Stopped")),
+                window.SP_REACT.createElement(DFL.PanelSectionRow, null,
+                    window.SP_REACT.createElement(DFL.ButtonItem, { layout: "below", onClick: handleServiceToggle }, serviceStatus.running ? "⏹️ Stop Service" : "▶️ Start Service")),
+                settings && (window.SP_REACT.createElement(window.SP_REACT.Fragment, null,
                     window.SP_REACT.createElement(DFL.PanelSectionRow, null,
-                        window.SP_REACT.createElement(DFL.SliderField, { label: "Sensitivity", value: settings.sensitivity, min: 0.1, max: 1.0, step: 0.05, onChange: handleSensitivityChange })),
-                    window.SP_REACT.createElement(DFL.PanelSectionRow, null,
-                        window.SP_REACT.createElement(DFL.ToggleField, { label: "Auto-Activate", description: "Automatically show visual cues when motion is detected", checked: settings.auto_activate, onChange: handleAutoActivateToggle })),
-                    window.SP_REACT.createElement(DFL.PanelSectionRow, null,
-                        window.SP_REACT.createElement(DFL.ToggleField, { label: "Show Visual Cues", description: "Manually toggle visual cues overlay", checked: showOverlay, onChange: handleOverlayToggle })),
-                    window.SP_REACT.createElement(DFL.PanelSectionRow, null,
-                        window.SP_REACT.createElement(DFL.ButtonItem, { layout: "below", onClick: handleCalibrationClick }, "\uD83D\uDD04 Calibrate Motion Sensors")),
-                    window.SP_REACT.createElement(DFL.PanelSectionRow, null,
-                        window.SP_REACT.createElement(DFL.ButtonItem, { layout: "below", onClick: handleStylesClick }, "\uD83C\uDFA8 Visual Style Settings")),
-                    renderDebugValues())))),
-            window.SP_REACT.createElement(DFL.PanelSectionRow, null,
-                window.SP_REACT.createElement(DFL.ButtonItem, { layout: "below", onClick: handleUninstall, disabled: uninstalling }, uninstalling ? "Uninstalling..." : "🗑️ Uninstall SteamDeckGyroDSU"))))),
+                        window.SP_REACT.createElement(DFL.ToggleField, { label: "Enable Motion Comfort", description: "Display visual cues to reduce motion sickness", checked: settings.enabled, onChange: handleEnabledToggle, disabled: !serviceStatus.running })),
+                    settings.enabled && (window.SP_REACT.createElement(window.SP_REACT.Fragment, null,
+                        window.SP_REACT.createElement(DFL.PanelSectionRow, null,
+                            window.SP_REACT.createElement(DFL.SliderField, { label: "Sensitivity", value: settings.sensitivity, min: 0.1, max: 1.0, step: 0.05, onChange: handleSensitivityChange })),
+                        window.SP_REACT.createElement(DFL.PanelSectionRow, null,
+                            window.SP_REACT.createElement(DFL.ToggleField, { label: "Auto-Activate", description: "Automatically show visual cues when motion is detected", checked: settings.auto_activate, onChange: handleAutoActivateToggle })),
+                        window.SP_REACT.createElement(DFL.PanelSectionRow, null,
+                            window.SP_REACT.createElement(DFL.ToggleField, { label: "Show Visual Cues", description: "Manually toggle visual cues overlay", checked: showOverlay, onChange: handleOverlayToggle })),
+                        window.SP_REACT.createElement(DFL.PanelSectionRow, null,
+                            window.SP_REACT.createElement(DFL.ButtonItem, { layout: "below", onClick: handleCalibrationClick }, "\uD83D\uDD04 Calibrate Motion Sensors")),
+                        window.SP_REACT.createElement(DFL.PanelSectionRow, null,
+                            window.SP_REACT.createElement(DFL.ButtonItem, { layout: "below", onClick: handleStylesClick }, "\uD83C\uDFA8 Visual Style Settings")),
+                        renderDebugValues())))),
+                window.SP_REACT.createElement(DFL.PanelSectionRow, null,
+                    window.SP_REACT.createElement(DFL.ButtonItem, { layout: "below", onClick: handleUninstall, disabled: uninstalling }, uninstalling ? "Uninstalling..." : "🗑️ Uninstall SteamDeckGyroDSU"))))),
         showOverlay && settings && motionData && (window.SP_REACT.createElement(MotionOverlay, { motionData: motionData, settings: settings })),
         showCalibration && motionData && (window.SP_REACT.createElement(CalibrationPanel, { motionData: motionData, onCancel: () => setShowCalibration(false), onComplete: (scaleX, scaleY, scaleZ) => {
                 finishCalibration(scaleX, scaleY, scaleZ);

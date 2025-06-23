@@ -47,5 +47,13 @@
         "react-dom"
       ]
     }
-  }
+  },
+  "remote_binary_bundling": false,
+  "remote_binary": [
+    {
+      "name": "SteamDeckGyroDSUSetup.zip",
+      "url": "https://github.com/kmicki/SteamDeckGyroDSU/releases/latest/download/SteamDeckGyroDSUSetup.zip",
+      "sha256hash": "7f86426a7131bdafde82ea54e38ba28594732cede24bce4a328d1cc912a08398"
+    }
+  ]
 }
