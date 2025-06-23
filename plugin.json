@@ -1,11 +1,11 @@
 {
-  "name": "Motion Comfort",
-  "author": "Your Name",
+  "name": "Motion Service",
+  "author": "itsOwen",
   "flags": [],
   "api_version": 1,
   "publish": {
-    "tags": ["motion-sickness", "comfort", "gyroscope", "motion-cues"],
-    "description": "Reduce motion sickness with Apple-like visual cues based on Steam Deck's built-in motion sensors.",
-    "image": "https://raw.githubusercontent.com/yourusername/MotionComfort/main/assets/motion-comfort.jpg"
+    "tags": ["motion", "sensor", "health", "accessibility", "gyroscope"],
+    "description": "Steam Deck Motion Service with motion cues for motion sickness prevention - provides real-time motion data and intelligent motion sickness detection.",
+    "image": "https://raw.githubusercontent.com/itsOwen/SteamDeckMotion/main/assets/motion-icon.jpg"
   }
 }

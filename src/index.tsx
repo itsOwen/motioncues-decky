@@ -1,692 +1,334 @@
-// src/index.tsx
 import { useState, useEffect } from "react";
 import {
   PanelSection,
   PanelSectionRow,
   ButtonItem,
-  ToggleField,
-  SliderField,
-  showModal,
-  ConfirmModal
+  ConfirmModal,
+  showModal
 } from "@decky/ui";
 import { definePlugin, callable } from "@decky/api";
-import { FiActivity } from "react-icons/fi";
+import { GiSoundWaves } from "react-icons/gi";
+import MotionServiceSection from "./MotionServiceSection";
+import MotionCuesSection from "./MotionCuesSection";
+import MotionDataSection from "./MotionDataSection";
 
-// Import components
-import MotionOverlay from "./MotionOverlay";
-import CalibrationPanel from "./CalibrationPanel";
-
-// Define interfaces
-interface MotionData {
-  accel_x: number;
-  accel_y: number;
-  accel_z: number;
-  gyro_pitch: number;
-  gyro_yaw: number;
-  gyro_roll: number;
-  timestamp: number;
-  fresh: boolean;
-}
-
-interface CalibrationSettings {
-  offset_x: number;
-  offset_y: number;
-  offset_z: number;
-  scale_x: number;
-  scale_y: number;
-  scale_z: number;
-}
-
-interface PluginSettings {
-  enabled: boolean;
-  sensitivity: number;
-  visual_style: string;
-  color: string;
-  opacity: number;
-  auto_activate: boolean;
-  calibration: CalibrationSettings;
+interface ServiceResult {
+  status: string;
+  message?: string;
+  output?: string;
+  enabled?: boolean;
 }
 
 interface ServiceStatus {
+  status: string;
   installed: boolean;
   running: boolean;
+  udp_available?: boolean;
+  message?: string;
 }
 
-// Define callable functions
-const checkDsuInstalled = callable<[], ServiceStatus>("check_dsu_installed");
-const installDsu = callable<[], any>("install_dsu");
-const uninstallDsu = callable<[], any>("uninstall_dsu");
-const startDsuService = callable<[], any>("start_dsu_service");
-const stopDsuService = callable<[], any>("stop_dsu_service");
-const toggleEnabled = callable<[boolean], any>("toggle_enabled");
-const getMotionData = callable<[], MotionData>("get_motion_data");
-const updateSettings = callable<[Partial<PluginSettings>], any>("update_settings");
-const getSettings = callable<[], PluginSettings>("get_settings");
-const setCalibrationOffsets = callable<[], any>("set_calibration_offsets");
-const finishCalibration = callable<[number, number, number], any>("finish_calibration");
+// Define callables
+const installMotionService = callable<[], ServiceResult>("install_motion_service");
+const checkServiceStatus = callable<[], ServiceStatus>("check_service_status");
+const startMotionService = callable<[], ServiceResult>("start_motion_service");
+const stopMotionService = callable<[], ServiceResult>("stop_motion_service");
+const uninstallMotionService = callable<[], ServiceResult>("uninstall_motion_service");
+const toggleMotionCues = callable<[], ServiceResult>("toggle_motion_cues");
+const getDebugInfo = callable<[], any>("get_debug_info");
+const logError = callable<[string], void>("log_error");
 
-// Main plugin component
-function MotionComfortContent() {
-  // States
-  const [serviceStatus, setServiceStatus] = useState<ServiceStatus>({ installed: false, running: false });
+function MotionServiceMainSection() {
+  const [serviceStatus, setServiceStatus] = useState<ServiceStatus | null>(null);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [result, setResult] = useState<string>('');
   const [installing, setInstalling] = useState<boolean>(false);
-  const [uninstalling, setUninstalling] = useState<boolean>(false);
-  const [motionData, setMotionData] = useState<MotionData | null>(null);
-  const [settings, setSettings] = useState<PluginSettings | null>(null);
-  const [dataUpdateInterval, setDataUpdateInterval] = useState<NodeJS.Timeout | null>(null);
-  const [showOverlay, setShowOverlay] = useState<boolean>(false);
-  const [showCalibration, setShowCalibration] = useState<boolean>(false);
+  const [showDebugInfo, setShowDebugInfo] = useState<boolean>(false);
+  const [debugInfo, setDebugInfo] = useState<any>(null);
 
-  // Load initial data
+  // Check service status periodically
   useEffect(() => {
-    const loadInitialData = async () => {
+    const checkStatus = async () => {
       try {
-        console.log("Loading initial data...");
-        const status = await checkDsuInstalled();
-        console.log("Initial status:", status);
+        const status = await checkServiceStatus();
         setServiceStatus(status);
-        
-        const loadedSettings = await getSettings();
-        console.log("Loaded settings:", loadedSettings);
-        setSettings(loadedSettings);
+      } catch (error) {
+        await logError(`Status check error: ${String(error)}`);
+      } finally {
+        setLoading(false);
+      }
+    };
 
-        if (status.running && loadedSettings.enabled) {
-          startDataUpdates();
-        }
-      } catch (error) {
-        console.error("Error loading initial data:", error);
-      }
-    };
-    
-    loadInitialData();
-    
-    // Set up regular service status check (more frequent)
-    const statusInterval = setInterval(async () => {
-      try {
-        const status = await checkDsuInstalled();
-        console.log("Status poll:", status);
-        setServiceStatus(prevStatus => {
-          // Only update if status actually changed
-          if (prevStatus.installed !== status.installed || prevStatus.running !== status.running) {
-            console.log("Status changed:", prevStatus, "->", status);
-            return status;
-          }
-          return prevStatus;
-        });
-      } catch (error) {
-        console.error("Error checking service status:", error);
-      }
-    }, 2000); // Check every 2 seconds for faster updates
-    
-    return () => {
-      clearInterval(statusInterval);
-      if (dataUpdateInterval) {
-        clearInterval(dataUpdateInterval);
-      }
-    };
+    checkStatus();
+    const interval = setInterval(checkStatus, 3000);
+    return () => clearInterval(interval);
   }, []);
 
-  // Start motion data updates
-  const startDataUpdates = () => {
-    if (dataUpdateInterval) {
-      clearInterval(dataUpdateInterval);
-    }
-    
-    const interval = setInterval(async () => {
-      try {
-        const data = await getMotionData();
-        setMotionData(data);
-        
-        // Show overlay if auto-activate is enabled and we have fresh data
-        if (settings?.auto_activate && data.fresh) {
-          // Check if motion exceeds threshold (sensitivity)
-          const threshold = 0.1 + (1.0 - (settings?.sensitivity || 0.5)) * 0.4;
-          const motion = Math.sqrt(
-            Math.pow(data.accel_x, 2) + 
-            Math.pow(data.accel_y, 2) + 
-            Math.pow(data.accel_z, 2)
-          );
-          
-          if (Math.abs(motion - 1.0) > threshold) {
-            setShowOverlay(true);
-          } else {
-            // Only hide if auto-activate is true
-            setShowOverlay(false);
-          }
-        }
-      } catch (error) {
-        console.error("Error fetching motion data:", error);
-      }
-    }, 33); // ~30fps
-    
-    setDataUpdateInterval(interval);
-  };
-
-  // Stop motion data updates
-  const stopDataUpdates = () => {
-    if (dataUpdateInterval) {
-      clearInterval(dataUpdateInterval);
-      setDataUpdateInterval(null);
-    }
-    setShowOverlay(false);
-  };
-
-  // Manual refresh function
-  const handleRefreshStatus = async () => {
-    try {
-      console.log("Manual refresh triggered");
-      const status = await checkDsuInstalled();
-      console.log("Manual refresh result:", status);
-      setServiceStatus(status);
-      
-      const loadedSettings = await getSettings();
-      setSettings(loadedSettings);
-      
-      if (status.running && loadedSettings.enabled) {
-        startDataUpdates();
-      }
-    } catch (error) {
-      console.error("Error during manual refresh:", error);
-    }
-  };
-
-  // Handle install button click
   const handleInstall = async () => {
     try {
       setInstalling(true);
-      console.log("Starting installation...");
-      const result = await installDsu();
-      console.log("Installation result:", result);
+      setResult('🔄 Installing Motion Service dependencies...');
       
-      if (result.status === "success") {
-        // Force multiple status checks to ensure UI updates
-        console.log("Installation successful, forcing status updates...");
-        
-        // Immediate check
-        try {
-          const status1 = await checkDsuInstalled();
-          console.log("Immediate status check:", status1);
-          setServiceStatus(status1);
-        } catch (error) {
-          console.error("Immediate status check failed:", error);
-        }
-        
-        // Check after 1 second
-        setTimeout(async () => {
-          try {
-            const status2 = await checkDsuInstalled();
-            console.log("1-second delayed status check:", status2);
-            setServiceStatus(status2);
-            
-            // If service is running and plugin is enabled, start data updates
-            if (status2.running && settings?.enabled) {
-              startDataUpdates();
-            }
-          } catch (error) {
-            console.error("Error checking status after 1s:", error);
-          }
-        }, 1000);
-        
-        // Check after 3 seconds
-        setTimeout(async () => {
-          try {
-            const status3 = await checkDsuInstalled();
-            console.log("3-second delayed status check:", status3);
-            setServiceStatus(status3);
-          } catch (error) {
-            console.error("Error checking status after 3s:", error);
-          }
-        }, 3000);
-        
+      // Get debug info first
+      const debug = await getDebugInfo();
+      setDebugInfo(debug);
+      
+      const response = await installMotionService();
+      
+      if (response.status === "success") {
+        setResult('✅ Motion Service dependencies installed successfully!');
+        // Refresh status
+        const newStatus = await checkServiceStatus();
+        setServiceStatus(newStatus);
       } else {
-        console.error("Installation failed:", result.message);
+        setResult(`❌ Installation failed: ${response.message}`);
+        setShowDebugInfo(true); // Show debug info on failure
       }
     } catch (error) {
-      console.error("Error installing DSU:", error);
+      setResult(`❌ Installation error: ${String(error)}`);
+      setShowDebugInfo(true);
+      await logError(`Install error: ${String(error)}`);
     } finally {
       setInstalling(false);
     }
   };
 
-  // Handle uninstall button click
   const handleUninstall = async () => {
     showModal(
       <ConfirmModal
-        strTitle="Confirm Uninstallation"
-        strDescription="Are you sure you want to uninstall SteamDeckGyroDSU? This will disable motion comfort features."
+        strTitle="Uninstall Motion Service Dependencies"
+        strDescription="This will completely remove all Motion Service files and stop the service. This action cannot be undone. Continue?"
         strOKButtonText="Uninstall"
         strCancelButtonText="Cancel"
         onOK={async () => {
           try {
-            setUninstalling(true);
-            stopDataUpdates();
-            const result = await uninstallDsu();
-            if (result.status === "success") {
-              // Force status update after uninstall
-              setTimeout(async () => {
-                try {
-                  const status = await checkDsuInstalled();
-                  setServiceStatus(status);
-                } catch (error) {
-                  console.error("Error checking status after uninstall:", error);
-                  // Force UI update even if check fails
-                  setServiceStatus({ installed: false, running: false });
-                }
-              }, 1000);
+            setResult('🔄 Uninstalling Motion Service dependencies...');
+            const response = await uninstallMotionService();
+            
+            if (response.status === "success") {
+              setResult('✅ Motion Service dependencies uninstalled successfully.');
+              // Refresh status
+              const newStatus = await checkServiceStatus();
+              setServiceStatus(newStatus);
             } else {
-              console.error("Uninstallation failed:", result.message);
+              setResult(`❌ Uninstall failed: ${response.message}`);
             }
           } catch (error) {
-            console.error("Error uninstalling DSU:", error);
-          } finally {
-            setUninstalling(false);
+            setResult(`❌ Uninstall error: ${String(error)}`);
+            await logError(`Uninstall error: ${String(error)}`);
           }
         }}
       />
     );
   };
 
-  // Handle service start/stop
-  const handleServiceToggle = async () => {
+  const handleToggleCues = async () => {
     try {
-      if (serviceStatus.running) {
-        const result = await stopDsuService();
-        if (result.status === "success") {
-          setServiceStatus({ ...serviceStatus, running: false });
-          stopDataUpdates();
-        }
+      const response = await toggleMotionCues();
+      if (response.status === "success") {
+        setResult(`✅ Motion cues ${response.enabled ? 'enabled' : 'disabled'}`);
       } else {
-        const result = await startDsuService();
-        if (result.status === "success") {
-          // Check status after a brief delay
-          setTimeout(async () => {
-            try {
-              const status = await checkDsuInstalled();
-              setServiceStatus(status);
-              if (status.running && settings?.enabled) {
-                startDataUpdates();
-              }
-            } catch (error) {
-              console.error("Error checking status after service start:", error);
-            }
-          }, 1000);
-        }
+        setResult(`❌ Failed to toggle cues: ${response.message}`);
       }
     } catch (error) {
-      console.error("Error toggling service:", error);
+      setResult(`❌ Error: ${String(error)}`);
+      await logError(`Toggle cues error: ${String(error)}`);
     }
   };
 
-  // Handle enable/disable toggle
-  const handleEnabledToggle = async (enabled: boolean) => {
-    try {
-      const result = await toggleEnabled(enabled);
-      if (result.status === "success") {
-        setSettings(prev => prev ? { ...prev, enabled } : null);
-        
-        if (enabled && serviceStatus.running) {
-          startDataUpdates();
-        } else {
-          stopDataUpdates();
-        }
-      }
-    } catch (error) {
-      console.error("Error toggling enabled state:", error);
-    }
-  };
-
-  // Handle sensitivity change
-  const handleSensitivityChange = async (value: number) => {
-    try {
-      const result = await updateSettings({ sensitivity: value });
-      if (result.status === "success") {
-        setSettings(prev => prev ? { ...prev, sensitivity: value } : null);
-      }
-    } catch (error) {
-      console.error("Error updating sensitivity:", error);
-    }
-  };
-
-  // Handle overlay toggle
-  const handleOverlayToggle = async (show: boolean) => {
-    setShowOverlay(show);
-    
-    // If auto-activate is enabled, disable it when manually toggling
-    if (settings?.auto_activate && show) {
-      const result = await updateSettings({ auto_activate: false });
-      if (result.status === "success") {
-        setSettings(prev => prev ? { ...prev, auto_activate: false } : null);
-      }
-    }
-  };
-
-  // Handle auto-activate toggle
-  const handleAutoActivateToggle = async (auto_activate: boolean) => {
-    try {
-      const result = await updateSettings({ auto_activate });
-      if (result.status === "success") {
-        setSettings(prev => prev ? { ...prev, auto_activate } : null);
-      }
-    } catch (error) {
-      console.error("Error toggling auto-activate:", error);
-    }
-  };
-
-  // Handle calibration button click
-  const handleCalibrationClick = async () => {
-    try {
-      // We'll start calibration directly in the backend when opening the panel
-      const result = await callable<[], any>("start_calibration")();
-      if (result.status === "success") {
-        setShowCalibration(true);
-      }
-    } catch (error) {
-      console.error("Error starting calibration:", error);
-    }
-  };
-
-  // Handle styles panel
-  const handleStylesClick = () => {
-    // For now, we'll just show a settings update in the main panel
-    const visualStyles = [
-      { label: "Edge Lines", value: "edge_lines" },
-      { label: "Corner Dots", value: "corner_dots" },
-      { label: "Center Circle", value: "center_circle" }
-    ];
-    
-    const colors = [
-      { label: "Green", value: "#00FF00" },
-      { label: "Blue", value: "#00AAFF" },
-      { label: "Red", value: "#FF0000" },
-      { label: "Yellow", value: "#FFFF00" },
-      { label: "White", value: "#FFFFFF" }
-    ];
-
-    // Show a simplified style settings in the main UI
-    if (settings) {
-      const modal = showModal(
-        <div style={{ padding: "16px" }}>
-          <h3>Visual Style Settings</h3>
-          <p>Select the visual style for motion cues:</p>
-          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-            {visualStyles.map(style => (
-              <button 
-                key={style.value}
-                onClick={async () => {
-                  const result = await updateSettings({ visual_style: style.value });
-                  if (result.status === "success") {
-                    setSettings(prev => prev ? { ...prev, visual_style: style.value } : null);
-                  }
-                }}
-                style={{
-                  padding: "8px",
-                  backgroundColor: settings.visual_style === style.value ? "#1a9fff" : "#2b2b2b",
-                  border: "none",
-                  borderRadius: "4px",
-                  color: "white",
-                  cursor: "pointer"
-                }}
-              >
-                {style.label}
-              </button>
-            ))}
-          </div>
-          
-          <h4 style={{ marginTop: "16px" }}>Color</h4>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
-            {colors.map(color => (
-              <div 
-                key={color.value}
-                onClick={async () => {
-                  const result = await updateSettings({ color: color.value });
-                  if (result.status === "success") {
-                    setSettings(prev => prev ? { ...prev, color: color.value } : null);
-                  }
-                }}
-                style={{
-                  width: "32px",
-                  height: "32px",
-                  backgroundColor: color.value,
-                  border: settings.color === color.value ? "2px solid white" : "2px solid transparent",
-                  borderRadius: "4px",
-                  cursor: "pointer"
-                }}
-              />
-            ))}
-          </div>
-          
-          <h4 style={{ marginTop: "16px" }}>Opacity</h4>
-          <div style={{ display: "flex", alignItems: "center" }}>
-            <input
-              type="range"
-              min="0.1"
-              max="1.0"
-              step="0.05"
-              value={settings.opacity}
-              onChange={async (e) => {
-                const value = parseFloat(e.target.value);
-                const result = await updateSettings({ opacity: value });
-                if (result.status === "success") {
-                  setSettings(prev => prev ? { ...prev, opacity: value } : null);
-                }
-              }}
-              style={{ width: "100%" }}
-            />
-            <div style={{ marginLeft: "8px", width: "40px" }}>{settings.opacity.toFixed(2)}</div>
-          </div>
-          
-          <div style={{ 
-            marginTop: "16px",
-            width: "100%",
-            height: "40px",
-            backgroundColor: settings.color,
-            opacity: settings.opacity,
-            borderRadius: "4px"
-          }} />
-          
-          <button
-            onClick={() => modal.Close()}
-            style={{
-              marginTop: "16px",
-              padding: "8px 16px",
-              backgroundColor: "#1a9fff",
-              border: "none",
-              borderRadius: "4px",
-              color: "white",
-              cursor: "pointer",
-              width: "100%"
-            }}
-          >
-            Close
-          </button>
-        </div>
+  const renderStatusDisplay = () => {
+    if (loading) {
+      return (
+        <PanelSectionRow>
+          <div>🔄 Checking Motion Service status...</div>
+        </PanelSectionRow>
       );
     }
-  };
 
-  // Render debug values
-  const renderDebugValues = () => {
-    if (!motionData) return null;
-    
-    const formatValue = (value: number) => value.toFixed(3);
-    
+    if (!serviceStatus) {
+      return (
+        <PanelSectionRow>
+          <div style={{ color: "red" }}>❌ Unable to check service status</div>
+        </PanelSectionRow>
+      );
+    }
+
+    const getStatusDisplay = () => {
+      if (!serviceStatus.installed) {
+        return "🔴 Motion Service Dependencies Not Installed";
+      }
+      
+      if (serviceStatus.running) {
+        if (serviceStatus.udp_available) {
+          return "🟢 Motion Service Active & Ready";
+        } else {
+          return "🟡 Motion Service Running (Starting up...)";
+        }
+      }
+      
+      return "🟠 Motion Service Dependencies Installed (Service Stopped)";
+    };
+
     return (
       <PanelSectionRow>
-        <div style={{ fontSize: '0.8em', opacity: 0.7 }}>
-          <div>Accel X: {formatValue(motionData.accel_x)}</div>
-          <div>Accel Y: {formatValue(motionData.accel_y)}</div>
-          <div>Accel Z: {formatValue(motionData.accel_z)}</div>
-          <div>Gyro Pitch: {formatValue(motionData.gyro_pitch)}</div>
-          <div>Gyro Yaw: {formatValue(motionData.gyro_yaw)}</div>
-          <div>Gyro Roll: {formatValue(motionData.gyro_roll)}</div>
-          <div>Data fresh: {motionData.fresh ? "Yes" : "No"}</div>
+        <div style={{ 
+          color: serviceStatus.installed && serviceStatus.running ? "green" : 
+                serviceStatus.installed ? "orange" : "red" 
+        }}>
+          {getStatusDisplay()}
         </div>
       </PanelSectionRow>
     );
   };
 
-  return (
-    <>
-      <PanelSection title="Motion Comfort">
-        {/* Debug info - remove in production */}
-        <PanelSectionRow>
-          <div style={{ fontSize: '0.7em', opacity: 0.6, padding: '4px', backgroundColor: '#2a2a2a', borderRadius: '4px' }}>
-            <div>Debug: installed={serviceStatus.installed.toString()}, running={serviceStatus.running.toString()}</div>
-            <div>Settings loaded: {settings ? 'Yes' : 'No'}</div>
-          </div>
-        </PanelSectionRow>
+  const renderDebugInfo = () => {
+    if (!showDebugInfo || !debugInfo) return null;
+
+    return (
+      <PanelSectionRow>
+        <div style={{
+          padding: '12px',
+          backgroundColor: 'var(--decky-selected-ui-bg)',
+          borderRadius: '4px',
+          fontSize: '0.8em',
+          maxHeight: '200px',
+          overflowY: 'auto'
+        }}>
+          <div style={{ fontWeight: 'bold', marginBottom: '8px' }}>🔧 Debug Information</div>
+          <pre style={{ margin: 0, whiteSpace: 'pre-wrap' }}>
+            {JSON.stringify(debugInfo, null, 2)}
+          </pre>
+        </div>
+      </PanelSectionRow>
+    );
+  };
+
+  // If not installed, show only the install button
+  if (!serviceStatus?.installed) {
+    return (
+      <PanelSection title="Motion Service">
+        {renderStatusDisplay()}
         
-        {/* Manual refresh button */}
         <PanelSectionRow>
           <ButtonItem 
-            layout="below"
-            onClick={handleRefreshStatus}
+            layout="below" 
+            onClick={handleInstall}
+            disabled={installing}
           >
-            🔄 Refresh Status
+            {installing ? "🔄 Installing Dependencies..." : "📥 Install Dependencies"}
           </ButtonItem>
         </PanelSectionRow>
-        
-        {!serviceStatus.installed ? (
+
+        {result && (
+          <PanelSectionRow>
+            <div style={{
+              padding: '12px',
+              marginTop: '8px',
+              backgroundColor: 'var(--decky-selected-ui-bg)',
+              borderRadius: '4px',
+              fontSize: '0.9em'
+            }}>
+              {result}
+            </div>
+          </PanelSectionRow>
+        )}
+
+        {renderDebugInfo()}
+
+        {showDebugInfo && (
           <PanelSectionRow>
             <ButtonItem 
-              layout="below"
-              onClick={handleInstall}
-              disabled={installing}
+              layout="below" 
+              onClick={() => setShowDebugInfo(!showDebugInfo)}
             >
-              {installing ? "Installing..." : "🔧 Install SteamDeckGyroDSU"}
+              {showDebugInfo ? "🔍 Hide Debug Info" : "🔍 Show Debug Info"}
             </ButtonItem>
           </PanelSectionRow>
-        ) : (
-          <>
-            <PanelSectionRow>
-              <div style={{ color: serviceStatus.running ? "green" : "red" }}>
-                {serviceStatus.running ? "🟢 Service Running" : "🔴 Service Stopped"}
-              </div>
-            </PanelSectionRow>
-            
-            <PanelSectionRow>
-              <ButtonItem
-                layout="below"
-                onClick={handleServiceToggle}
-              >
-                {serviceStatus.running ? "⏹️ Stop Service" : "▶️ Start Service"}
-              </ButtonItem>
-            </PanelSectionRow>
-            
-            {settings && (
-              <>
-                <PanelSectionRow>
-                  <ToggleField
-                    label="Enable Motion Comfort"
-                    description="Display visual cues to reduce motion sickness"
-                    checked={settings.enabled}
-                    onChange={handleEnabledToggle}
-                    disabled={!serviceStatus.running}
-                  />
-                </PanelSectionRow>
-                
-                {settings.enabled && (
-                  <>
-                    <PanelSectionRow>
-                      <SliderField
-                        label="Sensitivity"
-                        value={settings.sensitivity}
-                        min={0.1}
-                        max={1.0}
-                        step={0.05}
-                        onChange={handleSensitivityChange}
-                      />
-                    </PanelSectionRow>
-                    
-                    <PanelSectionRow>
-                      <ToggleField
-                        label="Auto-Activate"
-                        description="Automatically show visual cues when motion is detected"
-                        checked={settings.auto_activate}
-                        onChange={handleAutoActivateToggle}
-                      />
-                    </PanelSectionRow>
-                    
-                    <PanelSectionRow>
-                      <ToggleField
-                        label="Show Visual Cues"
-                        description="Manually toggle visual cues overlay"
-                        checked={showOverlay}
-                        onChange={handleOverlayToggle}
-                      />
-                    </PanelSectionRow>
-                    
-                    <PanelSectionRow>
-                      <ButtonItem
-                        layout="below"
-                        onClick={handleCalibrationClick}
-                      >
-                        🔄 Calibrate Motion Sensors
-                      </ButtonItem>
-                    </PanelSectionRow>
-                    
-                    <PanelSectionRow>
-                      <ButtonItem
-                        layout="below"
-                        onClick={handleStylesClick}
-                      >
-                        🎨 Visual Style Settings
-                      </ButtonItem>
-                    </PanelSectionRow>
-                    
-                    {/* Debug values, can be removed in production */}
-                    {renderDebugValues()}
-                  </>
-                )}
-              </>
-            )}
-            
-            <PanelSectionRow>
-              <ButtonItem
-                layout="below"
-                onClick={handleUninstall}
-                disabled={uninstalling}
-              >
-                {uninstalling ? "Uninstalling..." : "🗑️ Uninstall SteamDeckGyroDSU"}
-              </ButtonItem>
-            </PanelSectionRow>
-          </>
         )}
+
+        <PanelSectionRow>
+          <div style={{ fontSize: '0.85em', opacity: 0.8, marginTop: '8px' }}>
+            Install the Motion Service dependencies to enable real-time motion data and motion sickness prevention features.
+          </div>
+        </PanelSectionRow>
       </PanelSection>
-      
-      {/* Motion overlay */}
-      {showOverlay && settings && motionData && (
-        <MotionOverlay 
-          motionData={motionData} 
-          settings={settings}
-        />
-      )}
-      
-      {/* Calibration panel */}
-      {showCalibration && motionData && (
-        <CalibrationPanel
-          motionData={motionData}
-          onCancel={() => setShowCalibration(false)}
-          onComplete={(scaleX, scaleY, scaleZ) => {
-            finishCalibration(scaleX, scaleY, scaleZ);
-            setShowCalibration(false);
-          }}
-          onSetOffsets={async () => {
-            await setCalibrationOffsets();
-          }}
-        />
-      )}
+    );
+  }
+
+  // If installed, show full interface
+  return (
+    <>
+      <PanelSection title="Motion Service Control">
+        {renderStatusDisplay()}
+
+        <PanelSectionRow>
+          <ButtonItem 
+            layout="below" 
+            onClick={async () => {
+              const response = serviceStatus.running 
+                ? await stopMotionService() 
+                : await startMotionService();
+              setResult(response.message || 'Operation completed');
+            }}
+          >
+            {serviceStatus.running ? "⏹️ Stop Service" : "▶️ Start Service"}
+          </ButtonItem>
+        </PanelSectionRow>
+
+        <PanelSectionRow>
+          <ButtonItem 
+            layout="below" 
+            onClick={handleToggleCues}
+          >
+            🍃 Toggle Motion Cues
+          </ButtonItem>
+        </PanelSectionRow>
+
+        <PanelSectionRow>
+          <ButtonItem 
+            layout="below" 
+            onClick={handleUninstall}
+          >
+            🗑️ Uninstall Dependencies
+          </ButtonItem>
+        </PanelSectionRow>
+
+        {result && (
+          <PanelSectionRow>
+            <div style={{
+              padding: '12px',
+              marginTop: '8px',
+              backgroundColor: 'var(--decky-selected-ui-bg)',
+              borderRadius: '4px',
+              fontSize: '0.9em'
+            }}>
+              {result}
+            </div>
+          </PanelSectionRow>
+        )}
+
+        <PanelSectionRow>
+          <div style={{ fontSize: '0.85em', opacity: 0.8, marginTop: '8px' }}>
+            Motion Service provides real-time motion data and intelligent motion sickness prevention.
+          </div>
+        </PanelSectionRow>
+      </PanelSection>
+
+      <MotionServiceSection />
+      <MotionCuesSection />
+      <MotionDataSection />
     </>
   );
 }
 
 export default definePlugin(() => ({
-  name: "Motion Comfort",
-  titleView: <div>Motion Comfort</div>,
+  name: "Motion Service Plugin",
+  titleView: <div>Motion Service</div>,
   alwaysRender: true,
-  content: <MotionComfortContent />,
-  icon: <FiActivity />,
+  content: (
+    <MotionServiceMainSection />
+  ),
+  icon: <GiSoundWaves />,
   onDismount() {
-    console.log("Plugin unmounted");
+    console.log("Motion Service plugin unmounted");
   },
 }));

@@ -1,31 +1,36 @@
 {
-  "name": "motion-comfort-decky",
+  "name": "steamdeck-motion-service-decky",
   "version": "1.0.0",
-  "description": "Motion sickness reduction plugin for Steam Deck with Apple-like motion cues",
+  "description": "Steam Deck Motion Service with intelligent motion cues and motion sickness detection",
   "type": "module",
   "scripts": {
     "build": "rollup -c",
     "watch": "rollup -c -w",
+    "check": "chmod +x scripts/check-build.sh && bash scripts/check-build.sh",
+    "setup": "mkdir -p scripts && chmod +x scripts/check-build.sh",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/yourusername/MotionComfort.git"
+    "url": "git+https://github.com/itsOwen/SteamDeckMotion.git"
   },
   "keywords": [
     "decky",
     "plugin",
+    "motion",
+    "sensor",
+    "gyroscope",
+    "accelerometer",
     "steam-deck",
     "motion-sickness",
-    "gyroscope",
-    "motion-cues"
+    "accessibility"
   ],
-  "author": "Your Name",
+  "author": "itsOwen",
   "license": "BSD-3-Clause",
   "bugs": {
-    "url": "https://github.com/yourusername/MotionComfort/issues"
+    "url": "https://github.com/itsOwen/SteamDeckMotion/issues"
   },
-  "homepage": "https://github.com/yourusername/MotionComfort",
+  "homepage": "https://github.com/itsOwen/SteamDeckMotion",
   "devDependencies": {
     "@decky/rollup": "^1.0.1",
     "@decky/ui": "^4.7.2",
@@ -51,9 +56,9 @@
   "remote_binary_bundling": false,
   "remote_binary": [
     {
-      "name": "SteamDeckGyroDSUSetup.zip",
-      "url": "https://github.com/kmicki/SteamDeckGyroDSU/releases/latest/download/SteamDeckGyroDSUSetup.zip",
-      "sha256hash": "7f86426a7131bdafde82ea54e38ba28594732cede24bce4a328d1cc912a08398"
+      "name": "SteamDeckMotionSetup.zip",
+      "url": "https://github.com/itsOwen/SteamDeckMotion/releases/download/SteamDeckMotion/SteamDeckMotionSetup.zip",
+      "sha256hash": "7f48f833f818014fa03d1535f068c5c14f2897ccd5030ea0a00040f6713b8356"
     }
   ]
 }
