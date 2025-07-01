@@ -631,4 +631,4 @@ class MotionServicePlugin:
         decky.logger.error(f"FRONTEND: {error}")
 
 # Plugin instance
-Plugin = MotionServicePlugin()
+Plugin = MotionServicePlugin
