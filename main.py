@@ -630,5 +630,5 @@ class MotionServicePlugin:
         """Log frontend errors"""
         decky.logger.error(f"FRONTEND: {error}")
 
-# Plugin instancePlugin = MotionServicePlugin
+# Plugin instance
 Plugin = MotionServicePlugin
